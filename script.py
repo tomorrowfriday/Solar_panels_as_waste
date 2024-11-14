@@ -26,12 +26,10 @@ def load_actual_data(file_pattern):
     actual_files = glob.glob(file_pattern)
     if not actual_files:
         print("No 'Actual' files found with pattern:", file_pattern)
-    
     actual_df_list = []
     for file in actual_files:
         try:
             df = pd.read_csv(file, delimiter=';')
-            
             if 'Photovoltaics [MWh] Calculated resolutions' in df.columns:
                 df['year'] = pd.to_datetime(df['Start date']).dt.year
                 df_actual = df[['year', 'Photovoltaics [MWh] Calculated resolutions']].copy()
@@ -39,15 +37,12 @@ def load_actual_data(file_pattern):
                 df_actual['Photovoltaics [MWh] Calculated resolutions'] = pd.to_numeric(
                     df_actual['Photovoltaics [MWh] Calculated resolutions'].str.replace(',', ''), errors='coerce'
                 ) / 1_000_000  # Convert MWh to TWh
-
                 df_actual.rename(columns={'Photovoltaics [MWh] Calculated resolutions': 'Photovoltaics [TWh] Calculated resolutions'}, inplace=True)
-                
                 actual_df_list.append(df_actual)
             else:
                 print(f"Column 'Photovoltaics [MWh] Calculated resolutions' not found in {file}")
         except pd.errors.ParserError as e:
             print(f"Error reading {file}: {e}")
-    
     if actual_df_list:
         actual_df = pd.concat(actual_df_list)
         actual_df = actual_df.groupby('year').mean().reset_index()
@@ -60,16 +55,13 @@ def load_installed_data(file_pattern):
     installed_files = glob.glob(file_pattern)
     if not installed_files:
         print("No 'Installed' files found with pattern:", file_pattern)
-    
     installed_df_list = []
     for file in installed_files:
         try:
             df = pd.read_csv(file, delimiter=';')
-            
             if 'Photovoltaics [MW] Original resolutions' in df.columns:
                 df['year'] = pd.to_datetime(df['Start date']).dt.year
                 df_installed = df[['year', 'Photovoltaics [MW] Original resolutions']].copy()
-
                 df_installed['Photovoltaics [MW] Original resolutions'] = pd.to_numeric(
                     df_installed['Photovoltaics [MW] Original resolutions'].str.replace(',', ''), errors='coerce'
                 )
@@ -78,7 +70,6 @@ def load_installed_data(file_pattern):
                 print(f"Column 'Photovoltaics [MW] Original resolutions' not found in {file}")
         except pd.errors.ParserError as e:
             print(f"Error reading {file}: {e}")
-    
     if installed_df_list:
         installed_df = pd.concat(installed_df_list)
         installed_df = installed_df.groupby('year').mean().reset_index()
@@ -87,10 +78,17 @@ def load_installed_data(file_pattern):
         return pd.DataFrame(columns=['year', 'Photovoltaics [MW] Original resolutions'])
 
 def load_and_filter_data(file_path):
-    """Load CSV data and filter for Germany."""
-    df = pd.read_csv(file_path)
-    germany_df = df[df['country'] == 'Germany']
+    """Load CSV data and filter for Germany, ensuring precision in 'solar_electricity' values."""
+    # Load CSV with high precision
+    df = pd.read_csv(file_path, float_precision='high')
+    
+    # Filter for Germany and keep only the necessary columns
+    germany_df = df[df['country'] == 'Germany'].copy()
     columns_to_keep = ['country', 'year', 'solar_electricity']
+    
+    # Ensure 'solar_electricity' retains meaningful precision
+    germany_df['solar_electricity'] = germany_df['solar_electricity'].apply(lambda x: round(x, 6))
+    
     return germany_df[columns_to_keep]
 
 def forecast_solar_electricity(germany_df, forecast_steps=EOF_time):
@@ -118,8 +116,8 @@ def forecast_solar_electricity(germany_df, forecast_steps=EOF_time):
     return pd.concat([germany_df, forecast_df], ignore_index=True)
 
 def add_shifted_column(germany_df, shift_periods=EOF_time):
-    """Create a 'solar_waste' column by shifting 'solar_electricity' by a specified number of years."""
-    germany_df['solar_waste'] = germany_df['solar_electricity'].shift(shift_periods)
+    """Create a 'solar_waste' column by shifting 'Photovoltaics [TWh] Calculated resolutions' by a specified number of years."""
+    germany_df['solar_waste'] = germany_df['Photovoltaics [TWh] Calculated resolutions'].shift(shift_periods)
     return germany_df
 
 def find_first_non_zero_entry(germany_df):
@@ -167,7 +165,8 @@ def estimate_photovoltaics(df):
     # Step 1: Estimate missing values in 'Photovoltaics [TWh] Calculated resolutions' based on 'solar_electricity'
     valid_data = df.dropna(subset=['solar_electricity', 'Photovoltaics [TWh] Calculated resolutions'])
     
-    # Calculate the correlation factor for available years
+    # Calculate the correlation factor for available years (using .copy() to avoid SettingWithCopyWarning)
+    valid_data = valid_data.copy()
     valid_data['correlation_factor'] = valid_data['Photovoltaics [TWh] Calculated resolutions'] / valid_data['solar_electricity']
     
     # Calculate the average correlation factor
@@ -183,7 +182,8 @@ def estimate_photovoltaics(df):
     # Drop rows where either 'Photovoltaics [TWh] Calculated resolutions' or 'Photovoltaics [MW] Original resolutions' is missing
     valid_data = df.dropna(subset=['Photovoltaics [MW] Original resolutions', 'Photovoltaics [TWh] Calculated resolutions'])
     
-    # Calculate the correlation factor for available years
+    # Calculate the correlation factor for available years (using .copy() to avoid SettingWithCopyWarning)
+    valid_data = valid_data.copy()
     valid_data['mw_correlation_factor'] = valid_data['Photovoltaics [MW] Original resolutions'] / valid_data['Photovoltaics [TWh] Calculated resolutions']
     
     # Calculate the average correlation factor
@@ -202,6 +202,25 @@ def estimate_photovoltaics(df):
 
     return df
 
+def calculate_waste_mass(germany_df):
+    """
+    Calculate 'waste_mass' from 'solar_waste' by dividing 'solar_waste' by 3.33 kWh
+    (converted to TWh) and then multiplying by 11.6. Update germany_df with this column.
+
+    Parameters:
+    germany_df (pd.DataFrame): DataFrame with 'solar_waste' column in TWh.
+
+    Returns:
+    pd.DataFrame: Updated DataFrame with new 'waste_mass' column.
+    """
+    # Convert 3.33 kWh to TWh
+    kWh_to_TWh = 3.33 / 1_000_000  # TWh per 3.33 kWh
+
+    # Calculate waste mass
+    germany_df['waste_mass'] = (germany_df['solar_waste'] / kWh_to_TWh) * 11.6
+
+    return germany_df
+
 # Main script execution
 def main():
     # Load and aggregate data for Actual and Installed files
@@ -210,13 +229,15 @@ def main():
     #
     germany_df = load_and_filter_data(file_path)
     germany_df = forecast_solar_electricity(germany_df)
-    germany_df = add_shifted_column(germany_df)
 
     # Merge the actual and installed data based on the year
     germany_df = germany_df.merge(actual_df[['year', 'Photovoltaics [TWh] Calculated resolutions']], on='year', how='left')
     germany_df = germany_df.merge(installed_df[['year', 'Photovoltaics [MW] Original resolutions']], on='year', how='left')
     
     germany_df = estimate_photovoltaics(germany_df)
+    germany_df = add_shifted_column(germany_df)
+    # Calculate waste mass and update the DataFrame
+    germany_df = calculate_waste_mass(germany_df)
 
     first_non_zero_year, first_non_zero_value = find_first_non_zero_entry(germany_df)
     
