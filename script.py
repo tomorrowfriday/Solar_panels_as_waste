@@ -91,8 +91,14 @@ def load_and_filter_data(file_path):
     
     return germany_df[columns_to_keep]
 
-def forecast_solar_electricity(germany_df, forecast_steps=EOF_time):
-    """Forecast future solar electricity values for the next EOF_time years."""
+def forecast_solar_electricity(germany_df, forecast_steps=100):
+    """
+    Forecast future solar electricity values for the next 100 years.
+    Values are capped at 505 * 0.30 once they reach or exceed this threshold.
+    """
+    # Threshold value
+    threshold = 505 * 0.30
+    
     train_df = germany_df.dropna(subset=['solar_electricity']).copy()
     
     train_df['year'] = pd.to_datetime(train_df['year'], format='%Y')
@@ -104,13 +110,16 @@ def forecast_solar_electricity(germany_df, forecast_steps=EOF_time):
 
     forecast = model_fit.forecast(steps=forecast_steps)
     forecast_years = pd.date_range(start=train_df.index[-1] + pd.DateOffset(years=1), periods=forecast_steps, freq='AS')
-    
+
+    # Apply the threshold to make values constant
+    forecast = forecast.clip(upper=threshold)
+
     forecast_df = pd.DataFrame({
         'country': 'Germany',
         'year': forecast_years,
         'solar_electricity': forecast.values
     })
-    
+
     germany_df.reset_index(drop=True, inplace=True)
     forecast_df['year'] = forecast_df['year'].dt.year  # Convert back to year format
     return pd.concat([germany_df, forecast_df], ignore_index=True)
@@ -118,6 +127,10 @@ def forecast_solar_electricity(germany_df, forecast_steps=EOF_time):
 def add_shifted_column(germany_df, shift_periods=EOF_time):
     """Create a 'solar_waste' column by shifting 'Photovoltaics [TWh] Calculated resolutions' by a specified number of years."""
     germany_df['solar_waste'] = germany_df['Photovoltaics [TWh] Calculated resolutions'].shift(shift_periods)
+    return germany_df
+
+def add_shifted_column_2(germany_df, shift_periods=EOF_time):
+    germany_df['solar_electricity_s'] = germany_df['Photovoltaics [TWh] Calculated resolutions'].shift(shift_periods)
     return germany_df
 
 def find_first_non_zero_entry(germany_df):
@@ -217,7 +230,7 @@ def calculate_waste_mass(germany_df):
     kWh_to_TWh = 3.33 / 1_000_000  # TWh per 3.33 kWh
 
     # Calculate waste mass
-    germany_df['waste_mass'] = (germany_df['solar_waste'] / kWh_to_TWh) * 11.6
+    germany_df['waste_mass'] = (germany_df['solar_waste'] / kWh_to_TWh) * 11.6 / 1000
 
     return germany_df
 
@@ -236,6 +249,7 @@ def main():
     
     germany_df = estimate_photovoltaics(germany_df)
     germany_df = add_shifted_column(germany_df)
+    germany_df = add_shifted_column_2(germany_df)
     # Calculate waste mass and update the DataFrame
     germany_df = calculate_waste_mass(germany_df)
 
